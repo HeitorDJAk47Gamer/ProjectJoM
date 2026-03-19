@@ -16,33 +16,36 @@ TOKENS = [
 PASTA_MUSICAS = "./music"
 
 bots = []
-servidores_ativos = {}  # guild_id -> bot_id
 
 # =========================
 # GERENCIADOR DE BOTS
 # =========================
 
-def get_bot_livre(guild_id):
+def get_bot_livre(guild_id, canal_id):
 
-    # se já tiver bot ativo neste servidor
-    if guild_id in servidores_ativos:
-        bot_id = servidores_ativos[guild_id]
+    # se já tem bot neste canal, reutiliza
+    for b in bots:
 
-        for b in bots:
-            if b.user and b.user.id == bot_id:
-                return b
+        guild = b.get_guild(guild_id)
+        if not guild:
+            continue
+
+        vc = guild.voice_client
+
+        if vc and vc.channel and vc.channel.id == canal_id:
+            return b
 
     # procurar bot livre
     for b in bots:
 
         guild = b.get_guild(guild_id)
+        if not guild:
+            continue
 
-        if guild:
+        vc = guild.voice_client
 
-            vc = guild.voice_client
-
-            if not vc:
-                return b
+        if not vc or not vc.is_connected():
+            return b
 
     return None
 
@@ -84,7 +87,8 @@ class SistemaMusica(commands.Cog):
     async def play(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        musica: str = commands.Param(autocomplete=autocompletar_musicas)
+        musica: str = commands.Param(autocomplete=autocompletar_musicas),
+        loop: bool = commands.Param(default=False, description="Ativar modo 24/7 (Loop infinito)?")
     ):
 
         if not inter.author.voice:
@@ -101,7 +105,12 @@ class SistemaMusica(commands.Cog):
                 ephemeral=True
             )
 
-        bot_escolhido = get_bot_livre(inter.guild.id)
+        canal_usuario = inter.author.voice.channel
+
+        bot_escolhido = get_bot_livre(
+            inter.guild.id,
+            canal_usuario.id
+        )
 
         if not bot_escolhido:
             return await inter.response.send_message(
@@ -125,19 +134,35 @@ class SistemaMusica(commands.Cog):
 
         if not vc:
             vc = await canal.connect()
-            servidores_ativos[inter.guild.id] = bot_escolhido.user.id
 
         if vc.is_playing():
             vc.stop()
 
-        audio = disnake.FFmpegPCMAudio(caminho)
+        # ==========================================
+        # A MÁGICA DO 24/7
+        # ==========================================
+        # Se 'loop' for True, o FFmpeg repete o arquivo infinitamente
+        opcoes_iniciais = "-stream_loop -1" if loop else ""
+        audio = disnake.FFmpegPCMAudio(caminho, before_options=opcoes_iniciais)
 
-        vc.play(audio)
+        def depois_tocar(error):
+            # O bot SÓ vai se desconectar se não estiver no modo 24/7
+            if not loop:
+                fut = asyncio.run_coroutine_threadsafe(
+                    vc.disconnect(),
+                    bot_escolhido.loop
+                )
+                try:
+                    fut.result()
+                except:
+                    pass
 
+        vc.play(audio, after=depois_tocar)
+
+        texto_loop = "\n🔄 **Modo 24/7 Ativado!**" if loop else ""
         await inter.edit_original_response(
-            content=f"🎵 **{musica}**\n🤖 Bot usado: **{bot_escolhido.user.name}**"
+            content=f"🎵 **{musica}**\n🤖 Bot usado: **{bot_escolhido.user.name}**{texto_loop}"
         )
-
 
     # -------------------------
     # ADICIONAR MÚSICA
@@ -193,9 +218,6 @@ class SistemaMusica(commands.Cog):
             vc.stop()
 
         await vc.disconnect()
-
-        if inter.guild.id in servidores_ativos:
-            del servidores_ativos[inter.guild.id]
 
         await inter.response.send_message("🛑 Música parada e bot desconectado.")
 
